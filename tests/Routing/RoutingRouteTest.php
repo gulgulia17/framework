@@ -18,7 +18,12 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
+use Illuminate\Routing\CallableDispatcher;
+use Illuminate\Routing\Contracts\CallableDispatcher as CallableDispatcherContract;
+use Illuminate\Routing\Contracts\ControllerDispatcher as ControllerDispatcherContract;
 use Illuminate\Routing\Controller;
+use Illuminate\Routing\ControllerDispatcher;
+use Illuminate\Routing\Events\Routing;
 use Illuminate\Routing\Exceptions\UrlGenerationException;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Routing\ResourceRegistrar;
@@ -476,6 +481,7 @@ class RoutingRouteTest extends TestCase
 
         $container->bind(RoutingTestUserModel::class, function () {
         });
+        $container->bind(CallableDispatcherContract::class, fn ($app) => new CallableDispatcher($app));
 
         $router->get('foo/{team}/{post}', [
             'middleware' => SubstituteBindings::class,
@@ -549,7 +555,7 @@ class RoutingRouteTest extends TestCase
         $route->bind($request1);
         $this->assertTrue($route->hasParameter('id'));
         $this->assertFalse($route->hasParameter('foo'));
-        $this->assertSame('1', $route->parameter('id'));
+        $this->assertSame('1', (string) $route->parameter('id'));
         $this->assertSame('png', $route->parameter('ext'));
 
         $request2 = Request::create('images/12.png', 'GET');
@@ -800,6 +806,20 @@ class RoutingRouteTest extends TestCase
         $route->where('bar', '[0-9]+');
         $this->assertFalse($route->matches($request));
 
+        $request = Request::create('foo/123', 'GET');
+        $route = new Route('GET', 'foo/{bar}', ['where' => ['bar' => '123|456'], function () {
+            //
+        }]);
+        $route->where('bar', '123|456');
+        $this->assertTrue($route->matches($request));
+
+        $request = Request::create('foo/123abc', 'GET');
+        $route = new Route('GET', 'foo/{bar}', ['where' => ['bar' => '123|456'], function () {
+            //
+        }]);
+        $route->where('bar', '123|456');
+        $this->assertFalse($route->matches($request));
+
         /*
          * Optional
          */
@@ -857,7 +877,7 @@ class RoutingRouteTest extends TestCase
         $request1 = Request::create('images/1.png', 'GET');
         $this->assertTrue($route->matches($request1));
         $route->bind($request1);
-        $this->assertSame('1', $route->parameter('id'));
+        $this->assertSame('1', (string) $route->parameter('id'));
         $this->assertSame('png', $route->parameter('ext'));
 
         $request2 = Request::create('images/12.png', 'GET');
@@ -997,6 +1017,7 @@ class RoutingRouteTest extends TestCase
         $container->singleton(Registrar::class, function () use ($router) {
             return $router;
         });
+        $container->bind(CallableDispatcherContract::class, fn ($app) => new CallableDispatcher($app));
         $container->bind(RouteModelInterface::class, RouteModelBindingStub::class);
         $router->get('foo/{bar}', ['middleware' => SubstituteBindings::class, 'uses' => function ($name) {
             return $name;
@@ -1498,6 +1519,7 @@ class RoutingRouteTest extends TestCase
         $router->get('foo/bar', function () {
             return '';
         });
+        $container->bind(CallableDispatcherContract::class, fn ($app) => new CallableDispatcher($app));
 
         $request = Request::create('http://foo.com/foo/bar', 'GET');
         $route = new Route('GET', 'foo/bar', ['http', function () {
@@ -1521,6 +1543,33 @@ class RoutingRouteTest extends TestCase
         $this->assertInstanceOf(Route::class, $_SERVER['__router.route']);
         $this->assertEquals($_SERVER['__router.route']->uri(), $route->uri());
         unset($_SERVER['__router.route']);
+    }
+
+    public function testRouterFiresRouteMatchingEvent()
+    {
+        $container = new Container;
+        $router = new Router($events = new Dispatcher, $container);
+        $container->singleton(Registrar::class, function () use ($router) {
+            return $router;
+        });
+        $container->bind(CallableDispatcherContract::class, fn ($app) => new CallableDispatcher($app));
+        $router->get('foo/bar', function () {
+            return '';
+        });
+
+        $request = Request::create('http://foo.com/foo/bar', 'GET');
+
+        $_SERVER['__router.request'] = null;
+
+        $events->listen(Routing::class, function ($event) {
+            $_SERVER['__router.request'] = $event->request;
+        });
+
+        $router->dispatchToRoute($request);
+
+        $this->assertInstanceOf(Request::class, $_SERVER['__router.request']);
+        $this->assertEquals($_SERVER['__router.request'], $request);
+        unset($_SERVER['__router.request']);
     }
 
     public function testRouterPatternSetting()
@@ -1641,6 +1690,47 @@ class RoutingRouteTest extends TestCase
         $this->assertSame('1|test-slug', $router->dispatch(Request::create('foo/1/test-slug', 'GET'))->getContent());
     }
 
+    public function testParentChildImplicitBindingsWhereOnlySomeParametersAreScoped()
+    {
+        $router = $this->getRouter();
+        $action = function (RoutingTestTeamModel $team, RoutingTestUserModel $user, RoutingTestPostModel $post) {
+            $this->assertInstanceOf(RoutingTestTeamModel::class, $team);
+            $this->assertInstanceOf(RoutingTestUserModel::class, $user);
+            $this->assertInstanceOf(RoutingTestPostModel::class, $post);
+
+            return $team->value.'|'.$user->value.'|'.$post->value;
+        };
+
+        $router->get('foo/{team}/{user:slug}/{post}', [
+            'middleware' => SubstituteBindings::class,
+            'uses' => $action,
+        ]);
+        $this->assertSame('1|test-slug|2', $router->dispatch(Request::create('foo/1/test-slug/2', 'GET'))->getContent());
+
+        $router->get('foo/{team}/{user}/{post:id}', [
+            'middleware' => SubstituteBindings::class,
+            'uses' => $action,
+        ]);
+        $this->assertSame('2|another-test-slug|3', $router->dispatch(Request::create('foo/2/another-test-slug/3', 'GET'))->getContent());
+    }
+
+    public function testApiResourceScopingWhenChildDoesNotBelongToParent()
+    {
+        ResourceRegistrar::singularParameters();
+        $router = $this->getRouter();
+        $router->apiResource(
+            'teams.users',
+            RouteTestNestedResourceControllerWithMissingUser::class,
+            ['only' => ['show']],
+        )
+            ->middleware(SubstituteBindings::class)
+            ->scoped();
+
+        $this->expectException(ModelNotFoundException::class);
+
+        $router->dispatch(Request::create('teams/1/users/2', 'GET'));
+    }
+
     public function testParentChildImplicitBindingsProperlyCamelCased()
     {
         $router = $this->getRouter();
@@ -1726,6 +1816,7 @@ class RoutingRouteTest extends TestCase
         $container->singleton(Registrar::class, function () use ($router) {
             return $router;
         });
+        $container->bind(CallableDispatcherContract::class, fn ($app) => new CallableDispatcher($app));
 
         $container->bind(RoutingTestUserModel::class, RoutingTestExtendedUserModel::class);
         $router->get('foo/{bar}', [
@@ -1773,6 +1864,25 @@ class RoutingRouteTest extends TestCase
         $response = $router->dispatch(Request::create('foo/bar', 'GET'));
         $this->assertNotInstanceOf(Response::class, $response);
         $this->assertInstanceOf(JsonResponse::class, $response);
+    }
+
+    public function testRouteFlushController()
+    {
+        $container = new Container;
+        $router = $this->getRouter();
+
+        $router->get('count', ActionCountStub::class);
+        $request = Request::create('count', 'GET');
+
+        $response = $router->dispatch($request);
+        $this->assertSame(1, (int) $response->getContent());
+
+        $response = $router->dispatch($request);
+        $this->assertSame(2, (int) $response->getContent());
+
+        $request->route()->flushController();
+        $response = $router->dispatch($request);
+        $this->assertSame(1, (int) $response->getContent());
     }
 
     public function testRouteRedirect()
@@ -1954,6 +2064,9 @@ class RoutingRouteTest extends TestCase
             return $router;
         });
 
+        $container->bind(ControllerDispatcherContract::class, fn ($app) => new ControllerDispatcher($app));
+        $container->bind(CallableDispatcherContract::class, fn ($app) => new CallableDispatcher($app));
+
         return $router;
     }
 }
@@ -2041,6 +2154,13 @@ class RouteTestResourceControllerWithModelParameter extends Controller
     public function show(RoutingTestUserModel $fooBar)
     {
         return $fooBar->value;
+    }
+}
+
+class RouteTestNestedResourceControllerWithMissingUser extends Controller
+{
+    public function show(RoutingTestTeamWithoutUserModel $team, RoutingTestUserModel $user)
+    {
     }
 }
 
@@ -2255,6 +2375,11 @@ class RoutingTestPostModel extends Model
 
 class RoutingTestTeamModel extends Model
 {
+    public function users()
+    {
+        return new RoutingTestUserModel;
+    }
+
     public function getRouteKeyName()
     {
         return 'id';
@@ -2296,11 +2421,31 @@ class RoutingTestNonExistingUserModel extends RoutingTestUserModel
     }
 }
 
+class RoutingTestTeamWithoutUserModel extends RoutingTestTeamModel
+{
+    public function users()
+    {
+        throw new ModelNotFoundException();
+    }
+}
+
 class ActionStub
 {
     public function __invoke()
     {
         return 'hello';
+    }
+}
+
+class ActionCountStub
+{
+    protected $count = 0;
+
+    public function __invoke()
+    {
+        $this->count++;
+
+        return $this->count;
     }
 }
 

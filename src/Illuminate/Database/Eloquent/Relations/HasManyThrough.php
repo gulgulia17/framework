@@ -389,6 +389,37 @@ class HasManyThrough extends Relation
     }
 
     /**
+     * Find a related model by its primary key or call a callback.
+     *
+     * @param  mixed  $id
+     * @param  \Closure|array  $columns
+     * @param  \Closure|null  $callback
+     * @return \Illuminate\Database\Eloquent\Model|\Illuminate\Database\Eloquent\Collection|mixed
+     */
+    public function findOr($id, $columns = ['*'], Closure $callback = null)
+    {
+        if ($columns instanceof Closure) {
+            $callback = $columns;
+
+            $columns = ['*'];
+        }
+
+        $result = $this->find($id, $columns);
+
+        $id = $id instanceof Arrayable ? $id->toArray() : $id;
+
+        if (is_array($id)) {
+            if (count($result) === count(array_unique($id))) {
+                return $result;
+            }
+        } elseif (! is_null($result)) {
+            return $result;
+        }
+
+        return $callback();
+    }
+
+    /**
      * Get the results of the relationship.
      *
      * @return mixed
@@ -508,9 +539,9 @@ class HasManyThrough extends Relation
      */
     public function chunkById($count, callable $callback, $column = null, $alias = null)
     {
-        $column = $column ?? $this->getRelated()->getQualifiedKeyName();
+        $column ??= $this->getRelated()->getQualifiedKeyName();
 
-        $alias = $alias ?? $this->getRelated()->getKeyName();
+        $alias ??= $this->getRelated()->getKeyName();
 
         return $this->prepareQueryBuilder()->chunkById($count, $callback, $column, $alias);
     }
@@ -564,9 +595,9 @@ class HasManyThrough extends Relation
      */
     public function lazyById($chunkSize = 1000, $column = null, $alias = null)
     {
-        $column = $column ?? $this->getRelated()->getQualifiedKeyName();
+        $column ??= $this->getRelated()->getQualifiedKeyName();
 
-        $alias = $alias ?? $this->getRelated()->getKeyName();
+        $alias ??= $this->getRelated()->getKeyName();
 
         return $this->prepareQueryBuilder()->lazyById($chunkSize, $column, $alias);
     }

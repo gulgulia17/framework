@@ -126,6 +126,52 @@ class DatabaseSchemaBlueprintIntegrationTest extends TestCase
         $this->assertEquals($expected2, $queries2);
     }
 
+    public function testChangingCharColumnsWork()
+    {
+        $this->db->connection()->getSchemaBuilder()->create('users', function ($table) {
+            $table->string('name');
+        });
+
+        $blueprint = new Blueprint('users', function ($table) {
+            $table->char('name', 50)->change();
+        });
+
+        $queries = $blueprint->toSql($this->db->connection(), new SQLiteGrammar);
+
+        $expected = [
+            'CREATE TEMPORARY TABLE __temp__users AS SELECT name FROM users',
+            'DROP TABLE users',
+            'CREATE TABLE users (name CHAR(50) NOT NULL COLLATE BINARY)',
+            'INSERT INTO users (name) SELECT name FROM __temp__users',
+            'DROP TABLE __temp__users',
+        ];
+
+        $this->assertEquals($expected, $queries);
+    }
+
+    public function testChangingDoubleColumnsWork()
+    {
+        $this->db->connection()->getSchemaBuilder()->create('products', function ($table) {
+            $table->integer('price');
+        });
+
+        $blueprint = new Blueprint('products', function ($table) {
+            $table->double('price')->change();
+        });
+
+        $queries = $blueprint->toSql($this->db->connection(), new SQLiteGrammar);
+
+        $expected = [
+            'CREATE TEMPORARY TABLE __temp__products AS SELECT price FROM products',
+            'DROP TABLE products',
+            'CREATE TABLE products (price DOUBLE PRECISION NOT NULL)',
+            'INSERT INTO products (price) SELECT price FROM __temp__products',
+            'DROP TABLE __temp__products',
+        ];
+
+        $this->assertEquals($expected, $queries);
+    }
+
     public function testRenameIndexWorks()
     {
         $this->db->connection()->getSchemaBuilder()->create('users', function ($table) {
